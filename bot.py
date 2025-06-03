@@ -15,6 +15,7 @@ from telegram.error import TelegramError
 CONFIG_FILE = 'bot_config.json'
 BOT_APP_CONFIG = {}
 DELAY_BOT_SEND = 1.5
+PYTHON_EXECUTABLE_PATH = "" # Define global variable for Python executable path
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -49,10 +50,7 @@ def generate_keyboard_for_menu(menu_id: str) -> InlineKeyboardMarkup:
         keyboard.append([InlineKeyboardButton(item["button_label"], callback_data=item["callback_data"])])
     return InlineKeyboardMarkup(keyboard)
 
-# --- Command, Button, and Message Handlers (Your Original Logic) ---
-# NOTE: All your async functions (start_command, button_handler, etc.) remain exactly the same as in your original file.
-# I am including them here for completeness.
-
+# --- Command, Button, and Message Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     logger.info(f"User {user.username} (ID: {user.id}) started the bot.")
@@ -127,8 +125,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         try:
             forwarder_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'forwarder.py')
+            # Use the global variable PYTHON_EXECUTABLE_PATH here
             process = subprocess.run(
-                [st.secrets["PYTHON_EXECUTABLE"], forwarder_script_path,
+                [PYTHON_EXECUTABLE_PATH, forwarder_script_path,
                  private_channel_id, messages_identifier, bot_username, end_user_chat_id],
                 capture_output=True, text=True, check=False, timeout=600
             )
@@ -162,81 +161,3 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except subprocess.TimeoutExpired:
             logger.error(f"Forwarder script timed out for action '{key}'.")
             await context.bot.send_message(chat_id=end_user_chat_id, text=f"⏳ Helper script for '{current_button_label}' timed out.")
-        except Exception as e:
-            logger.error(f"Error in button_handler for action {key}: {e}", exc_info=True)
-            await context.bot.send_message(chat_id=end_user_chat_id, text="🚨 Unexpected bot error.")
-
-async def xercese_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # THIS ENTIRE FUNCTION IS IDENTICAL TO YOURS.
-    # It has been omitted for brevity but should be copied from your original file.
-    # ... (copy your full xercese_message_handler function here) ...
-    pass # Placeholder for the copied function
-
-
-# --- Streamlit Application and Bot Startup Logic ---
-
-@st.cache_resource
-def start_bot():
-    """Initializes and runs the bot in a background thread."""
-    # Ensure bot config is loaded
-    global BOT_APP_CONFIG
-    BOT_APP_CONFIG = load_bot_config()
-    if not BOT_APP_CONFIG:
-        st.error("Bot configuration failed to load. The bot cannot start.")
-        return None
-
-    # Get the Python executable path for the subprocess
-    st.secrets["PYTHON_EXECUTABLE"] = os.sys.executable
-
-    # Build the application
-    application = Application.builder().token(st.secrets["BOT_TOKEN"]).build()
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    xercese_filter = filters.User(user_id=int(st.secrets["XERCESE_USER_ID"]))
-    application.add_handler(MessageHandler(xercese_filter & (~filters.COMMAND), xercese_message_handler))
-
-    # Define the function that will run in the thread
-    def run_bot():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.run_polling(allowed_updates=Update.ALL_TYPES))
-
-    # Start the bot in a daemon thread
-    thread = threading.Thread(target=run_bot, daemon=True)
-    thread.start()
-    logger.info("Bot has been started in a background thread.")
-    
-    return application
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="Bot Control Panel", page_icon="🤖")
-st.title("🤖 Bot Control Panel")
-
-st.info("This panel ensures the Telegram bot process is running on Streamlit Cloud.")
-
-# Check for necessary secrets
-if "BOT_TOKEN" not in st.secrets or "XERCESE_USER_ID" not in st.secrets:
-    st.error("Essential secrets (BOT_TOKEN, XERCESE_USER_ID) are missing. Please configure them in Streamlit Cloud.")
-else:
-    # Start the bot
-    app = start_bot()
-
-    if app:
-        st.success("Bot process has been started successfully.")
-        st.write("The bot is now active and listening for messages in the background.")
-        
-        # Display bot info as a check
-        try:
-            # We need to run async code in Streamlit's main thread carefully
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            bot_info = loop.run_until_complete(app.bot.get_me())
-            st.json({
-                "Bot Name": bot_info.first_name,
-                "Username": f"@{bot_info.username}",
-                "User ID": bot_info.id
-            })
-        except Exception as e:
-            st.error(f"Could not fetch bot info. The bot might still be running. Error: {e}")
