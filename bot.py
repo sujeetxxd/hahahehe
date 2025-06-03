@@ -1,69 +1,6 @@
-import logging
-import json
-import os
-import subprocess
-import asyncio
-import threading
-import streamlit as st
+# In bot.py
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from telegram.error import TelegramError
-
-# --- Configuration ---
-# Secrets are now fetched from Streamlit's secrets manager
-CONFIG_FILE = 'bot_config.json'
-BOT_APP_CONFIG = {}
-DELAY_BOT_SEND = 1.5
-PYTHON_EXECUTABLE_PATH = "" # Define global variable for Python executable path
-
-# --- Logging ---
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- Config Loading ---
-# This function is now cached by Streamlit to avoid rereading the file on every interaction
-@st.cache_data
-def load_bot_config():
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        if 'menus' not in config or 'actions' not in config:
-            st.error(f"'{CONFIG_FILE}' is missing 'menus' or 'actions' keys.")
-            return {}
-        logger.info(f"Loaded bot configuration from '{CONFIG_FILE}'.")
-        return config
-    except Exception as e:
-        st.error(f"Error loading '{CONFIG_FILE}': {e}")
-        return {}
-
-# --- Helper function to generate keyboards ---
-def generate_keyboard_for_menu(menu_id: str) -> InlineKeyboardMarkup:
-    menu_items = BOT_APP_CONFIG.get('menus', {}).get(menu_id, [])
-    if not menu_items and menu_id != "root":
-        return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="navigate:root")]])
-    elif not menu_items and menu_id == "root":
-        return InlineKeyboardMarkup([[InlineKeyboardButton("Configuration error.", callback_data="noop")]])
-
-    keyboard = []
-    for item in menu_items:
-        keyboard.append([InlineKeyboardButton(item["button_label"], callback_data=item["callback_data"])])
-    return InlineKeyboardMarkup(keyboard)
-
-# --- Command, Button, and Message Handlers ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    logger.info(f"User {user.username} (ID: {user.id}) started the bot.")
-
-    if not BOT_APP_CONFIG or 'root' not in BOT_APP_CONFIG.get('menus', {}):
-        await update.message.reply_text("Bot configuration is incomplete. Please contact the admin.")
-        return
-
-    keyboard = generate_keyboard_for_menu("root")
-    await update.message.reply_html(
-        rf"Hi {user.mention_html()}! Please choose an option:",
-        reply_markup=keyboard
-    )
+# ... (other parts of bot.py remain the same as previously corrected) ...
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -111,7 +48,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.bot_data[f"last_button_for_{end_user_chat_id}"] = current_button_label
 
         bot_info = await context.bot.get_me()
-        bot_username = bot_info.username
+        bot_username = bot_info.username # This is typically @YourBotUsername
         if not bot_username:
             logger.error("Bot requires a username!")
             await query.edit_message_text(text="⚠️ Bot error: I need a username.")
@@ -121,14 +58,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         private_channel_id = action_config["private_channel_id"]
         messages_identifier = action_config["messages_identifier"]
-        logger.info(f"Calling forwarder.py: Chan='{private_channel_id}', IDN='{messages_identifier}', TargetBot='@{bot_username}', ForUser='{end_user_chat_id}'")
+        
+        # Log before calling the subprocess
+        logger.info(f"Preparing to call forwarder.py: Chan='{private_channel_id}', IDN='{messages_identifier}', TargetBot='{bot_username}', ForUser='{end_user_chat_id}'")
 
         try:
+            # Retrieve Telethon API credentials from Streamlit secrets
+            telethon_api_id = st.secrets.get("TELETHON_API_ID")
+            telethon_api_hash = st.secrets.get("TELETHON_API_HASH")
+
+            if not telethon_api_id or not telethon_api_hash:
+                logger.error("Telethon API ID or Hash is missing from secrets.")
+                await query.edit_message_text(text="⚠️ Bot configuration error: Missing API credentials for helper script.")
+                return
+
             forwarder_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'forwarder.py')
-            # Use the global variable PYTHON_EXECUTABLE_PATH here
+            
+            process_args = [
+                PYTHON_EXECUTABLE_PATH,
+                forwarder_script_path,
+                str(telethon_api_id),    # api_id_arg
+                telethon_api_hash,       # api_hash_arg
+                private_channel_id,      # pci_arg
+                messages_identifier,     # mi_arg
+                bot_username,            # tbu_arg (e.g. @BotUsername)
+                end_user_chat_id         # orci_arg
+            ]
+            
+            # Log the arguments being passed to the script, excluding the executable and script path for brevity if needed
+            logger.info(f"Calling forwarder.py with arguments (excluding exec/path): {process_args[2:]}")
+
+
             process = subprocess.run(
-                [PYTHON_EXECUTABLE_PATH, forwarder_script_path,
-                 private_channel_id, messages_identifier, bot_username, end_user_chat_id],
+                process_args,
                 capture_output=True, text=True, check=False, timeout=600
             )
 
@@ -150,14 +112,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             user_facing_message = f"ℹ️ No messages found for '{current_button_label}'."
                         else:
                             user_facing_message = f"Helper has initiated transfer of {total_found} items. I will relay them shortly."
-            except (json.JSONDecodeError, AttributeError):
+            except (json.JSONDecodeError, AttributeError): # Handle cases where stdout is not valid JSON
+                logger.warning(f"Forwarder output was not valid JSON or attribute error. stdout: '{stdout_data}', stderr: '{stderr_data}'")
                 user_facing_message = "Helper script finished, but status is unclear."
                 if process.returncode != 0:
                     output_to_show = stderr_data if stderr_data else stdout_data or "Unknown error."
                     user_facing_message = f"⚠️ Error processing request: {output_to_show[:300]}"
+                elif not stdout_data and not stderr_data: # No output, could be an issue
+                     user_facing_message = f"Helper script for '{current_button_label}' finished with no output. Please check logs."
+
 
             await query.edit_message_text(text=user_facing_message)
 
         except subprocess.TimeoutExpired:
             logger.error(f"Forwarder script timed out for action '{key}'.")
+            # await query.edit_message_text(text=f"⏳ Helper script for '{current_button_label}' timed out.") # Query might be too old
             await context.bot.send_message(chat_id=end_user_chat_id, text=f"⏳ Helper script for '{current_button_label}' timed out.")
+        except Exception as e:
+            logger.error(f"Error in button_handler for action {key}: {e}", exc_info=True)
+            # await query.edit_message_text(text="🚨 Unexpected bot error.") # Query might be too old
+            await context.bot.send_message(chat_id=end_user_chat_id, text="🚨 Unexpected bot error.")
+
+# ... (rest of bot.py, including xercese_message_handler, start_bot, and Streamlit UI) ...
